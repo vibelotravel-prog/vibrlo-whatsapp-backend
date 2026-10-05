@@ -56,14 +56,11 @@ app.get("/webhook", (req, res) => {
     token &&
     token === VERIFY_TOKEN
   ) {
-
     console.log("Webhook verified successfully");
-
     return res.status(200).send(challenge);
   }
 
   console.log("Webhook verification failed");
-
   return res.sendStatus(403);
 });
 
@@ -90,137 +87,89 @@ app.post("/webhook", (req, res) => {
 
 app.post("/send-whatsapp", async (req, res) => {
 
-  // Protect this endpoint
   const receivedApiKey = req.get("x-api-key");
 
   if (
     !BACKEND_API_KEY ||
     receivedApiKey !== BACKEND_API_KEY
   ) {
-
     return res.status(401).json({
       success: false,
       error: "Unauthorized"
     });
   }
 
-
   const { to, message } = req.body || {};
 
-
   if (!to || !message) {
-
     return res.status(400).json({
       success: false,
       error: "Phone number and message are required"
     });
   }
 
-
   if (
     !WHATSAPP_TOKEN ||
     !PHONE_NUMBER_ID ||
     !GRAPH_API_VERSION
   ) {
-
     return res.status(500).json({
       success: false,
       error: "WhatsApp server configuration is incomplete"
     });
   }
 
-
   try {
 
     const url =
       `https://graph.facebook.com/${GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`;
 
-
     const response = await fetch(url, {
-
       method: "POST",
 
       headers: {
-
-        "Authorization":
-          `Bearer ${WHATSAPP_TOKEN}`,
-
-        "Content-Type":
-          "application/json"
+        "Authorization": `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
       },
 
       body: JSON.stringify({
-
         messaging_product: "whatsapp",
-
         recipient_type: "individual",
-
         to: to,
-
         type: "text",
-
         text: {
           body: message
         }
-
       })
-
     });
-
 
     const data = await response.json();
 
-
     if (!response.ok) {
+      console.error("WhatsApp API Error:", data);
 
-      console.error(
-        "WhatsApp API Error:",
-        data
-      );
-
-      return res
-        .status(response.status)
-        .json({
-          success: false,
-          whatsapp: data
-        });
+      return res.status(response.status).json({
+        success: false,
+        whatsapp: data
+      });
     }
 
-
-    console.log(
-      "WhatsApp message sent:",
-      data
-    );
-
+    console.log("WhatsApp message sent:", data);
 
     return res.status(200).json({
-
       success: true,
-
       whatsapp: data
-
     });
-
 
   } catch (error) {
 
-    console.error(
-      "WhatsApp Send Error:",
-      error
-    );
-
+    console.error("WhatsApp Send Error:", error);
 
     return res.status(500).json({
-
       success: false,
-
-      error:
-        "Unable to send WhatsApp message"
-
+      error: "Unable to send WhatsApp message"
     });
-
   }
-
 });
 
 
@@ -229,9 +178,7 @@ app.post("/send-whatsapp", async (req, res) => {
 // =====================================================
 
 app.listen(PORT, () => {
-
   console.log(
     `VIBLO WhatsApp Backend running on port ${PORT}`
   );
-
 });
