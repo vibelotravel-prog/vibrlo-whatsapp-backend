@@ -2,17 +2,57 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const admin = require("firebase-admin");
 
+function initializeFirebase() {
+  if (admin.apps.length) return;
+
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    try {
+      const serviceAccount = JSON.parse(
+        process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+      );
+
+      if (serviceAccount.private_key) {
+        serviceAccount.private_key =
+          serviceAccount.private_key.replace(/\\n/g, "\n");
+      }
+
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+
+      console.log(
+        "Firebase Admin initialized using service account."
+      );
+      return;
+    } catch (error) {
+      console.error(
+        "FIREBASE_SERVICE_ACCOUNT_JSON is invalid:",
+        error.message
+      );
+      throw error;
+    }
+  }
+
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+  });
+
+  console.log(
+    "Firebase Admin initialized using application default credentials."
+  );
+}
+
+initializeFirebase();
+
+const db = admin.firestore();
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 10000;
-
-// =====================================================
-// META / WHATSAPP SETTINGS
-// =====================================================
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
@@ -24,12 +64,62 @@ const PHONE_NUMBER_ID =
 const GRAPH_API_VERSION =
   process.env.GRAPH_API_VERSION || "v26.0";
 
-const BACKEND_API_KEY = process.env.BACKEND_API_KEY;
+const BACKEND_API_KEY =
+  process.env.BACKEND_API_KEY;
 
+function normalizeWhatsAppNumber(value) {
+  let digits =
+    String(value || "").replace(/\D/g, "");
 
-// =====================================================
-// 1. HOME TEST
-// =====================================================
+  if (!digits) return "";
+
+  if (digits.length === 10) {
+    digits = "91" + digits;
+  }
+
+  if (
+    digits.length === 13 &&
+    digits.startsWith("091")
+  ) {
+    digits = digits.substring(1);
+  }
+
+  return digits;
+}
+
+function money(value) {
+  const n = Number(value || 0);
+  return `₹${n.toFixed(2)}`;
+}
+
+function safeText(value, fallback = "-") {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function requireApiKey(req, res, next) {
+  if (!BACKEND_API_KEY) {
+    return res.status(500).json({
+      ok: false,
+      error:
+        "BACKEND_API_KEY is not configured on server",
+    });
+  }
+
+  const receivedKey = req.get("x-api-key");
+
+  if (
+    !receivedKey ||
+    receivedKey !== BACKEND_API_KEY
+  ) {
+    return res.status(401).json({
+      ok: false,
+      error: "Unauthorized",
+    });
+  }
+
+  next();
+}
 
 app.get("/", (req, res) => {
   res
@@ -37,25 +127,18 @@ app.get("/", (req, res) => {
     .send("VIBELO WhatsApp Backend is running");
 });
 
-
-// =====================================================
-// 2. HEALTH CHECK
-// =====================================================
-
 app.get("/health", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "VIBELO WhatsApp Backend"
+    service: "VIBELO WhatsApp Backend",
+    firebase: admin.apps.length > 0,
+    whatsappConfigured: Boolean(
+      WHATSAPP_TOKEN && PHONE_NUMBER_ID
+    ),
   });
 });
 
-
-// =====================================================
-// 3. META WEBHOOK VERIFICATION
-// =====================================================
-
 app.get("/webhook", (req, res) => {
-
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -63,486 +146,766 @@ app.get("/webhook", (req, res) => {
   if (
     mode === "subscribe" &&
     token &&
+    VERIFY_TOKEN &&
     token === VERIFY_TOKEN
   ) {
-
-    console.log("Webhook verified successfully");
-
+    console.log("WEBHOOK VERIFIED");
     return res.status(200).send(challenge);
   }
-
-  console.log("Webhook verification failed");
 
   return res.sendStatus(403);
 });
 
-
-// =====================================================
-// HELPER - SEND WHATSAPP MESSAGE
-// =====================================================
-
 async function sendWhatsAppMessage(to, message) {
-
   if (!WHATSAPP_TOKEN) {
-    throw new Error("WHATSAPP_TOKEN is missing");
+    throw new Error(
+      "WHATSAPP_TOKEN is not configured"
+    );
   }
 
   if (!PHONE_NUMBER_ID) {
-    throw new Error("PHONE_NUMBER_ID is missing");
+    throw new Error(
+      "PHONE_NUMBER_ID is not configured"
+    );
   }
 
-  const cleanNumber =
-    String(to).replace(/[^\d]/g, "");
+  const customerNumber =
+    normalizeWhatsAppNumber(to);
+
+  if (!customerNumber) {
+    throw new Error(
+      "Customer WhatsApp number is missing"
+    );
+  }
+
+  const body =
+    String(message || "").trim();
+
+  if (!body) {
+    throw new Error(
+      "WhatsApp message is empty"
+    );
+  }
 
   const url =
-    `https://graph.facebook.com/${GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`;
+    `https://graph.facebook.com/` +
+    `${GRAPH_API_VERSION}/` +
+    `${PHONE_NUMBER_ID}/messages`;
 
   const response = await fetch(url, {
-
     method: "POST",
 
     headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
+      Authorization:
+        `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json",
     },
 
     body: JSON.stringify({
       messaging_product: "whatsapp",
       recipient_type: "individual",
-      to: cleanNumber,
+      to: customerNumber,
       type: "text",
+
       text: {
         preview_url: false,
-        body: message
-      }
-    })
+        body,
+      },
+    }),
   });
 
   const data = await response.json();
 
   if (!response.ok) {
-
     console.error(
-      "WhatsApp API Error:",
-      JSON.stringify(data, null, 2)
+      "Meta WhatsApp API error:",
+      JSON.stringify(data)
     );
 
     throw new Error(
       data?.error?.message ||
-      "WhatsApp API request failed"
+      "Meta WhatsApp API request failed"
     );
   }
-
-  console.log(
-    "WhatsApp message sent:",
-    JSON.stringify(data, null, 2)
-  );
 
   return data;
 }
 
+function buildFinalBillMessage(data) {
+  const customerName =
+    safeText(
+      data.customerName || data.name,
+      "Customer"
+    );
 
-// =====================================================
-// 4. RECEIVE WHATSAPP MESSAGE + AUTO REPLY
-// =====================================================
+  const pickup = safeText(data.pickup);
+  const drop = safeText(data.drop);
 
+  const totalKM =
+    Number(data.totalKM || 0).toFixed(1);
+
+  const kmFare =
+    Number(data.kmFare || 0);
+
+  const driverBata =
+    Number(data.driverBata || 0);
+
+  const toll =
+    Number(data.toll || 0);
+
+  const parking =
+    Number(data.parking || 0);
+
+  const permit =
+    Number(data.permit || 0);
+
+  const hill =
+    Number(data.hill || 0);
+
+  const totalFare =
+    Number(data.totalFare || 0);
+
+  const paymentStatus =
+    safeText(
+      data.customerPaymentStatus,
+      "Pending"
+    );
+
+  const paymentMethod =
+    safeText(
+      data.customerPaymentMethod,
+      "Not specified"
+    );
+
+  return [
+    "🚕 VIBELO Tours and Travels",
+    "",
+    "FINAL TRIP BILL",
+    "",
+    `Customer: ${customerName}`,
+    `Pickup: ${pickup}`,
+    `Drop: ${drop}`,
+    "",
+    `Total KM: ${totalKM} KM`,
+    `KM Fare: ${money(kmFare)}`,
+    `Driver Bata: ${money(driverBata)}`,
+    `Toll: ${money(toll)}`,
+    `Parking: ${money(parking)}`,
+    `Permit: ${money(permit)}`,
+    `Hill Charges: ${money(hill)}`,
+    "",
+    `TOTAL FARE: ${money(totalFare)}`,
+    "",
+    `Payment Status: ${paymentStatus}`,
+    `Payment Method: ${paymentMethod}`,
+    "",
+    "Thank you for travelling with VIBELO.",
+  ].join("\n");
+}
 app.post("/webhook", async (req, res) => {
-
-  // Meta expects HTTP 200 quickly
   res.sendStatus(200);
 
-  console.log(
-    "WhatsApp Webhook Event:",
-    JSON.stringify(req.body, null, 2)
-  );
-
   try {
+    const value =
+      req.body?.entry?.[0]
+        ?.changes?.[0]
+        ?.value;
 
-    const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
+    const messages = value?.messages;
 
-    const incomingMessage =
-      value?.messages?.[0];
-
-    // Status / delivery / read event
-    if (!incomingMessage) {
-
-      console.log(
-        "Webhook received - no incoming customer message"
-      );
-
+    if (
+      !Array.isArray(messages) ||
+      messages.length === 0
+    ) {
       return;
     }
 
-    const customerNumber =
-      incomingMessage.from;
-
-    const messageType =
-      incomingMessage.type;
-
-    console.log(
-      "Incoming customer:",
-      customerNumber
-    );
-
-    console.log(
-      "Incoming type:",
-      messageType
-    );
-
-
-    // =================================================
-    // TEXT MESSAGE
-    // =================================================
-
-    if (messageType === "text") {
-
-      const customerText =
-        incomingMessage.text?.body?.trim() || "";
-
-      console.log(
-        "Customer message:",
-        customerText
-      );
-
-      const lowerText =
-        customerText.toLowerCase();
-
-
-      // ===============================================
-      // PREMIUM WELCOME MESSAGE
-      // ===============================================
-
-      if (
-        lowerText === "hi" ||
-        lowerText === "hello" ||
-        lowerText === "hai" ||
-        lowerText === "hey" ||
-        lowerText === "hii"
-      ) {
-
-        const reply =
-  "✨ Thank you for choosing VIBELO Tours & Travels.\n\n" +
-  "We've received your message successfully.\n" +
-  "Our Customer Care Team will be in touch with you shortly.\n\n" +
-  "Thank you for trusting VIBELO. 💙\n" +
-  "Your Journey, Our Priority.";
-
-        await sendWhatsAppMessage(
-          customerNumber,
-          reply
+    for (const incoming of messages) {
+      const from =
+        normalizeWhatsAppNumber(
+          incoming?.from
         );
 
-        console.log(
-          "VIBELO premium welcome reply sent successfully"
-        );
-
-        return;
+      if (!from) {
+        continue;
       }
 
+      if (incoming?.type !== "text") {
+        await sendWhatsAppMessage(
+          from,
+          [
+            "Welcome to VIBELO Tours and Travels.",
+            "",
+            "Please type your trip details:",
+            "Pickup:",
+            "Drop:",
+            "Journey Date:",
+            "Journey Time:",
+          ].join("\n")
+        );
 
-      // ===============================================
-      // GENERAL CUSTOMER MESSAGE
-      // ===============================================
+        continue;
+      }
 
-      const reply =
-        "✨ *Thank You for Contacting VIBELO* ✨\n\n" +
-        "Your travel request has been received.\n\n" +
-        "Please share your Pickup Location, Drop Location and Journey Date & Time.\n\n" +
-        "Our team will assist you shortly.\n\n" +
-        "👑 *VIBELO Tours & Travels*\n" +
-        "Your Journey. Our Priority.";
+      const incomingText =
+        String(
+          incoming?.text?.body || ""
+        )
+          .trim()
+          .toLowerCase();
 
-      await sendWhatsAppMessage(
-        customerNumber,
-        reply
-      );
+      const greetings = [
+        "hi",
+        "hello",
+        "hai",
+        "hey",
+        "hii",
+      ];
 
-      console.log(
-        "VIBELO general auto reply sent successfully"
-      );
-
-      return;
+      if (
+        greetings.includes(incomingText)
+      ) {
+        await sendWhatsAppMessage(
+          from,
+          [
+            "Welcome to VIBELO Tours and Travels 🚕",
+            "",
+            "Premium Taxi & Tour Booking Service",
+            "",
+            "Please send:",
+            "Pickup Location",
+            "Drop Location",
+            "Journey Date",
+            "Journey Time",
+            "",
+            "Our team will assist you shortly.",
+          ].join("\n")
+        );
+      } else {
+        await sendWhatsAppMessage(
+          from,
+          [
+            "Thank you for contacting VIBELO.",
+            "",
+            "Please send your trip details:",
+            "Pickup:",
+            "Drop:",
+            "Journey Date:",
+            "Journey Time:",
+          ].join("\n")
+        );
+      }
     }
-
-
-    // =================================================
-    // NON-TEXT MESSAGE
-    // =================================================
-
-    const reply =
-      "✨ *Thank You for Contacting VIBELO* ✨\n\n" +
-      "Please type your Pickup Location, Drop Location and Journey Date & Time.\n\n" +
-      "👑 *VIBELO Tours & Travels*";
-
-    await sendWhatsAppMessage(
-      customerNumber,
-      reply
-    );
-
-    console.log(
-      "VIBELO non-text auto reply sent successfully"
-    );
-
   } catch (error) {
-
     console.error(
-      "WEBHOOK AUTO REPLY ERROR:",
+      "Webhook processing error:",
       error
     );
   }
 });
 
+app.post(
+  "/send-whatsapp",
+  requireApiKey,
+  async (req, res) => {
+    try {
+      const { to, message } =
+        req.body || {};
 
-// =====================================================
-// 5. SEND MESSAGE FROM VIBELO SYSTEM
-// Booking Confirmation / Bill / Wallet Reward
-// =====================================================
+      if (!to || !message) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "to and message are required",
+        });
+      }
 
-app.post("/send-whatsapp", async (req, res) => {
+      const result =
+        await sendWhatsAppMessage(
+          to,
+          message
+        );
 
-  const receivedApiKey =
-    req.get("x-api-key");
+      return res.status(200).json({
+        ok: true,
+        result,
+      });
+    } catch (error) {
+      console.error(
+        "send-whatsapp error:",
+        error
+      );
 
-  if (
-    !BACKEND_API_KEY ||
-    receivedApiKey !== BACKEND_API_KEY
-  ) {
-
-    return res.status(401).json({
-      success: false,
-      error: "Unauthorized"
-    });
+      return res.status(500).json({
+        ok: false,
+        error: error.message,
+      });
+    }
   }
+);
 
-  const { to, message } =
-    req.body || {};
+app.post(
+  "/send-booking-confirmation",
+  requireApiKey,
+  async (req, res) => {
+    try {
+      const {
+        to,
+        customerName,
+        bookingId,
+        pickup,
+        drop,
+        journeyDate,
+        journeyTime,
+        vehicle,
+        totalFare,
+      } = req.body || {};
 
-  if (!to || !message) {
+      if (!to) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Customer WhatsApp number is required",
+        });
+      }
 
-    return res.status(400).json({
-      success: false,
-      error:
-        "Phone number and message are required"
-    });
+      const message = [
+        "🚕 VIBELO Tours and Travels",
+        "",
+        "BOOKING CONFIRMED",
+        "",
+        `Customer: ${safeText(
+          customerName,
+          "Customer"
+        )}`,
+        `Booking ID: ${safeText(
+          bookingId
+        )}`,
+        `Pickup: ${safeText(pickup)}`,
+        `Drop: ${safeText(drop)}`,
+        `Journey Date: ${safeText(
+          journeyDate
+        )}`,
+        `Journey Time: ${safeText(
+          journeyTime
+        )}`,
+        `Vehicle: ${safeText(vehicle)}`,
+        `Fare: ${money(totalFare)}`,
+        "",
+        "Thank you for choosing VIBELO.",
+      ].join("\n");
+
+      const result =
+        await sendWhatsAppMessage(
+          to,
+          message
+        );
+
+      return res.status(200).json({
+        ok: true,
+        result,
+      });
+    } catch (error) {
+      console.error(
+        "Booking confirmation error:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+);
+
+async function claimOutboxItem(docRef) {
+  return db.runTransaction(
+    async (transaction) => {
+      const snapshot =
+        await transaction.get(docRef);
+
+      if (!snapshot.exists) {
+        return null;
+      }
+
+      const data = snapshot.data();
+
+      if (data.status !== "Pending") {
+        return null;
+      }
+
+      transaction.update(docRef, {
+        status: "Processing",
+
+        processingStartedAt:
+          admin.firestore.FieldValue
+            .serverTimestamp(),
+
+        updatedAt:
+          admin.firestore.FieldValue
+            .serverTimestamp(),
+      });
+
+      return {
+        id: snapshot.id,
+        ...data,
+      };
+    }
+  );
+}
+
+async function processFinalBillDocument(
+  docRef
+) {
+  const item =
+    await claimOutboxItem(docRef);
+
+  if (!item) {
+    return {
+      processed: false,
+      reason:
+        "Document is no longer Pending",
+    };
   }
 
   try {
+    if (item.type !== "FINAL_BILL") {
+      throw new Error(
+        `Unsupported outbox type: ${
+          item.type || "EMPTY"
+        }`
+      );
+    }
 
-    const data =
+    const customerPhone =
+      normalizeWhatsAppNumber(
+        item.customerPhone
+      );
+
+    if (!customerPhone) {
+      throw new Error(
+        "Customer WhatsApp number is missing"
+      );
+    }
+
+    const message =
+      buildFinalBillMessage(item);
+
+    const metaResult =
       await sendWhatsAppMessage(
-        to,
+        customerPhone,
         message
       );
 
-    return res.status(200).json({
-      success: true,
-      whatsapp: data
+    const messageId =
+      metaResult?.messages?.[0]?.id ||
+      "";
+
+    await docRef.update({
+      status: "Sent",
+
+      sendAttempts:
+        admin.firestore.FieldValue
+          .increment(1),
+
+      lastError: "",
+
+      metaMessageId: messageId,
+
+      sentAt:
+        admin.firestore.FieldValue
+          .serverTimestamp(),
+
+      updatedAt:
+        admin.firestore.FieldValue
+          .serverTimestamp(),
     });
 
-  } catch (error) {
+    if (item.dutyId) {
+      try {
+        const enquiryRef =
+          db
+            .collection("enquiries")
+            .doc(
+              String(item.dutyId)
+            );
 
+        await enquiryRef.set(
+          {
+            customerBillDeliveryStatus:
+              "Sent",
+
+            whatsappQueueStatus:
+              "Sent",
+
+            whatsappSentAt:
+              admin.firestore.FieldValue
+                .serverTimestamp(),
+
+            whatsappMetaMessageId:
+              messageId,
+          },
+          { merge: true }
+        );
+      } catch (enquiryError) {
+        console.error(
+          "Enquiry status update error:",
+          enquiryError
+        );
+      }
+    }
+
+    return {
+      processed: true,
+      sent: true,
+      id: item.id,
+      metaMessageId: messageId,
+    };
+  } catch (error) {
     console.error(
-      "WhatsApp Send Error:",
+      "Final bill send error:",
       error
     );
 
-    return res.status(500).json({
-      success: false,
-      error: error.message
+    await docRef.update({
+      status: "Failed",
+
+      sendAttempts:
+        admin.firestore.FieldValue
+          .increment(1),
+
+      lastError:
+        String(
+          error.message || error
+        ).slice(0, 1000),
+
+      failedAt:
+        admin.firestore.FieldValue
+          .serverTimestamp(),
+
+      updatedAt:
+        admin.firestore.FieldValue
+          .serverTimestamp(),
     });
+
+    if (item.dutyId) {
+      try {
+        await db
+          .collection("enquiries")
+          .doc(
+            String(item.dutyId)
+          )
+          .set(
+            {
+              customerBillDeliveryStatus:
+                "Failed",
+
+              whatsappQueueStatus:
+                "Failed",
+
+              whatsappLastError:
+                String(
+                  error.message ||
+                  error
+                ).slice(0, 500),
+            },
+            { merge: true }
+          );
+      } catch (enquiryError) {
+        console.error(
+          "Failed enquiry update error:",
+          enquiryError
+        );
+      }
+    }
+
+    return {
+      processed: true,
+      sent: false,
+      id: item.id,
+      error: error.message,
+    };
   }
-});
+}
+async function processWhatsAppOutbox(
+  limit = 10
+) {
+  const snapshot =
+    await db
+      .collection("whatsappOutbox")
+      .where("status", "==", "Pending")
+      .limit(limit)
+      .get();
 
+  if (snapshot.empty) {
+    return {
+      checked: 0,
+      sent: 0,
+      failed: 0,
+      results: [],
+    };
+  }
 
-// =====================================================
-// 6. PRIVACY POLICY
-// =====================================================
+  const results = [];
 
-app.get("/privacy", (req, res) => {
+  for (const document of snapshot.docs) {
+    const result =
+      await processFinalBillDocument(
+        document.ref
+      );
 
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
+    results.push(result);
+  }
 
-    <head>
-      <meta charset="UTF-8">
-      <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-      >
+  return {
+    checked: results.length,
 
-      <title>
-        Privacy Policy - VIBELO Tours and Travels
-      </title>
-    </head>
+    sent: results.filter(
+      (x) => x.sent === true
+    ).length,
 
-    <body
-      style="
-        font-family:Arial,sans-serif;
-        max-width:850px;
-        margin:40px auto;
-        padding:20px;
-        line-height:1.6;
-      "
-    >
+    failed: results.filter(
+      (x) =>
+        x.processed === true &&
+        x.sent === false
+    ).length,
 
-      <h1>Privacy Policy</h1>
+    results,
+  };
+}
 
-      <h2>VIBELO Tours and Travels</h2>
+let outboxProcessing = false;
 
-      <p>
-        <strong>Effective date:</strong>
-        05 October 2026
-      </p>
-
-      <p>
-        VIBELO Tours and Travels respects your privacy
-        and is committed to protecting the personal
-        information you provide while using our travel,
-        taxi and booking services.
-      </p>
-
-      <h3>Information We Collect</h3>
-
-      <p>
-        We may collect information such as your name,
-        mobile number, WhatsApp number, pickup and drop
-        locations, journey details, booking details and
-        other information necessary to provide our services.
-      </p>
-
-      <h3>How We Use Your Information</h3>
-
-      <p>
-        We use this information to process enquiries and
-        bookings, communicate with customers, provide trip
-        updates, assign suitable service providers, provide
-        customer support and improve our services.
-      </p>
-
-      <h3>WhatsApp Communication</h3>
-
-      <p>
-        When you communicate with VIBELO through WhatsApp,
-        we may process your messages and contact details
-        to respond to enquiries, provide booking assistance
-        and send service-related communications.
-      </p>
-
-      <h3>Information Sharing</h3>
-
-      <p>
-        We may share necessary booking information with
-        drivers, partners or service providers only when
-        required to provide the requested service.
-        We do not sell personal information.
-      </p>
-
-      <h3>Data Security</h3>
-
-      <p>
-        We take reasonable measures to protect personal
-        information from unauthorized access, misuse or
-        disclosure.
-      </p>
-
-      <h3>Data Retention and Deletion</h3>
-
-      <p>
-        We retain information only as necessary for
-        providing our services, maintaining records and
-        meeting applicable legal requirements.
-        Customers may contact us to request deletion of
-        their personal information, subject to applicable
-        legal and operational requirements.
-      </p>
-
-      <h3>Contact Us</h3>
-
-      <p>
-        For privacy questions or data deletion requests,
-        please contact VIBELO Tours and Travels through
-        our official customer support channels.
-      </p>
-
-      <p>
-        <strong>Last updated:</strong>
-        05 October 2026
-      </p>
-
-    </body>
-    </html>
-  `);
-});
-
-// =====================================================
-// BOOKING CONFIRMATION WHATSAPP
-// =====================================================
-
-app.post("/send-booking-confirmation", async (req, res) => {
-  try {
-    const {
-      customerName,
-      phone,
-      pickup,
-      drop,
-      dateTime,
-      vehicle
-    } = req.body;
-
-    if (!phone) {
-      return res.status(400).json({
-        success: false,
-        message: "Customer phone number is required"
+app.post(
+  "/process-whatsapp-outbox",
+  async (req, res) => {
+    if (outboxProcessing) {
+      return res.status(202).json({
+        ok: true,
+        message:
+          "WhatsApp outbox processing is already running",
       });
     }
 
-    const bookingMessage =
-      "✨ *VIBELO Tours & Travels*\n\n" +
-      "✅ *Your Booking is Confirmed!*\n\n" +
-      "Thank you for choosing VIBELO.\n\n" +
-     "Dear " + (customerName || "Valued Customer") + ",\n\n" +
-      "📍 *From:* " + (pickup || "-") + "\n" +
-      "📍 *To:* " + (drop || "-") + "\n" +
-      "📅 *Date & Time:* " + (dateTime || "-") + "\n" +
-      "🚘 *Vehicle:* " + (vehicle || "-") + "\n\n" +
-      "Have a pleasant journey with VIBELO. 💙\n\n" +
-      "*Your Journey, Our Priority.*";
+    outboxProcessing = true;
 
-    await sendWhatsAppMessage(phone, bookingMessage);
+    try {
+      const result =
+        await processWhatsAppOutbox(10);
 
-    console.log(
-      "Booking confirmation WhatsApp sent successfully:",
-      phone
-    );
+      return res.status(200).json({
+        ok: true,
+        ...result,
+      });
+    } catch (error) {
+      console.error(
+        "Outbox processing error:",
+        error
+      );
 
-    return res.status(200).json({
-      success: true,
-      message: "Booking confirmation sent successfully"
-    });
-
-  } catch (error) {
-    console.error(
-      "BOOKING CONFIRMATION ERROR:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to send booking confirmation"
-    });
+      return res.status(500).json({
+        ok: false,
+        error: error.message,
+      });
+    } finally {
+      outboxProcessing = false;
+    }
   }
+);
+
+app.post(
+  "/admin/process-whatsapp-outbox",
+  requireApiKey,
+  async (req, res) => {
+    try {
+      const result =
+        await processWhatsAppOutbox(20);
+
+      return res.status(200).json({
+        ok: true,
+        ...result,
+      });
+    } catch (error) {
+      console.error(
+        "Admin outbox processing error:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+);
+
+app.get("/privacy", (req, res) => {
+  res.type("html").send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title>
+    VIBELO Privacy Policy
+  </title>
+</head>
+
+<body
+  style="
+    font-family:Arial,sans-serif;
+    max-width:850px;
+    margin:40px auto;
+    padding:20px;
+    line-height:1.7;
+  "
+>
+  <h1>
+    VIBELO Privacy Policy
+  </h1>
+
+  <p>
+    VIBELO Tours and Travels uses customer
+    information only for booking, trip,
+    customer support and service communication
+    purposes.
+  </p>
+
+  <p>
+    Customer information is not sold to
+    third parties.
+  </p>
+
+  <p>
+    WhatsApp may be used to provide booking
+    information, trip updates and final bill
+    communication related to VIBELO services.
+  </p>
+
+  <p>
+    Customers may contact VIBELO for questions
+    regarding their information.
+  </p>
+</body>
+</html>
+  `);
 });
-// =====================================================
-// 7. START SERVER
-// =====================================================
+
+app.use((req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: "Route not found",
+  });
+});
 
 app.listen(PORT, () => {
-
   console.log(
     `VIBELO WhatsApp Backend running on port ${PORT}`
   );
-
 });
