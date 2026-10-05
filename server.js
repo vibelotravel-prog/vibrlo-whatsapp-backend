@@ -477,7 +477,64 @@ app.get("/privacy", (req, res) => {
   `);
 });
 
+// =====================================================
+// BOOKING CONFIRMATION WHATSAPP
+// =====================================================
 
+app.post("/send-booking-confirmation", async (req, res) => {
+  try {
+    const {
+      customerName,
+      phone,
+      pickup,
+      drop,
+      dateTime,
+      vehicle
+    } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer phone number is required"
+      });
+    }
+
+    const bookingMessage =
+      "✨ *VIBELO Tours & Travels*\n\n" +
+      "✅ *Your Booking is Confirmed!*\n\n" +
+      "Thank you for choosing VIBELO.\n\n" +
+     "Dear " + (customerName || "Valued Customer") + ",\n\n" +
+      "📍 *From:* " + (pickup || "-") + "\n" +
+      "📍 *To:* " + (drop || "-") + "\n" +
+      "📅 *Date & Time:* " + (dateTime || "-") + "\n" +
+      "🚘 *Vehicle:* " + (vehicle || "-") + "\n\n" +
+      "Have a pleasant journey with VIBELO. 💙\n\n" +
+      "*Your Journey, Our Priority.*";
+
+    await sendWhatsAppMessage(phone, bookingMessage);
+
+    console.log(
+      "Booking confirmation WhatsApp sent successfully:",
+      phone
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Booking confirmation sent successfully"
+    });
+
+  } catch (error) {
+    console.error(
+      "BOOKING CONFIRMATION ERROR:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send booking confirmation"
+    });
+  }
+});
 // =====================================================
 // 7. START SERVER
 // =====================================================
