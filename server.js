@@ -223,17 +223,11 @@ app.post("/webhook", async (req, res) => {
       ) {
 
         const reply =
-          "✨ *WELCOME TO VIBELO* ✨\n\n" +
-          "Your Journey. Our Priority.\n\n" +
-          "Thank you for choosing VIBELO Tours & Travels.\n\n" +
-          "We're delighted to assist with your journey.\n\n" +
-          "Please share your:\n" +
-          "📍 Pickup Location\n" +
-          "🏁 Drop Location\n" +
-          "📅 Journey Date & Time\n\n" +
-          "Our team will take care of your journey from here.\n\n" +
-          "👑 *VIBELO Tours & Travels*\n" +
-          "Premium Travel • Personal Care";
+  "✨ Thank you for choosing VIBELO Tours & Travels.\n\n" +
+  "We've received your message successfully.\n" +
+  "Our Customer Care Team will be in touch with you shortly.\n\n" +
+  "Thank you for trusting VIBELO. 💙\n" +
+  "Your Journey, Our Priority.";
 
         await sendWhatsAppMessage(
           customerNumber,
