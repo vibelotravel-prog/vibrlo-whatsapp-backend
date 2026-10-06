@@ -4,6 +4,9 @@ const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
 
+// =====================================================
+// FIREBASE
+// =====================================================
 function initializeFirebase() {
   if (admin.apps.length) return;
 
@@ -22,9 +25,7 @@ function initializeFirebase() {
         credential: admin.credential.cert(serviceAccount),
       });
 
-      console.log(
-        "Firebase Admin initialized using service account."
-      );
+      console.log("Firebase Admin initialized using service account.");
       return;
     } catch (error) {
       console.error(
@@ -54,6 +55,9 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 10000;
 
+// =====================================================
+// META / WHATSAPP SETTINGS
+// =====================================================
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 
@@ -64,12 +68,13 @@ const PHONE_NUMBER_ID =
 const GRAPH_API_VERSION =
   process.env.GRAPH_API_VERSION || "v26.0";
 
-const BACKEND_API_KEY =
-  process.env.BACKEND_API_KEY;
+const BACKEND_API_KEY = process.env.BACKEND_API_KEY;
 
+// =====================================================
+// HELPERS
+// =====================================================
 function normalizeWhatsAppNumber(value) {
-  let digits =
-    String(value || "").replace(/\D/g, "");
+  let digits = String(value || "").replace(/\D/g, "");
 
   if (!digits) return "";
 
@@ -77,10 +82,7 @@ function normalizeWhatsAppNumber(value) {
     digits = "91" + digits;
   }
 
-  if (
-    digits.length === 13 &&
-    digits.startsWith("091")
-  ) {
+  if (digits.length === 13 && digits.startsWith("091")) {
     digits = digits.substring(1);
   }
 
@@ -101,17 +103,13 @@ function requireApiKey(req, res, next) {
   if (!BACKEND_API_KEY) {
     return res.status(500).json({
       ok: false,
-      error:
-        "BACKEND_API_KEY is not configured on server",
+      error: "BACKEND_API_KEY is not configured on server",
     });
   }
 
   const receivedKey = req.get("x-api-key");
 
-  if (
-    !receivedKey ||
-    receivedKey !== BACKEND_API_KEY
-  ) {
+  if (!receivedKey || receivedKey !== BACKEND_API_KEY) {
     return res.status(401).json({
       ok: false,
       error: "Unauthorized",
@@ -121,10 +119,11 @@ function requireApiKey(req, res, next) {
   next();
 }
 
+// =====================================================
+// HOME / HEALTH
+// =====================================================
 app.get("/", (req, res) => {
-  res
-    .status(200)
-    .send("VIBELO WhatsApp Backend is running");
+  res.status(200).send("VIBELO WhatsApp Backend is running");
 });
 
 app.get("/health", (req, res) => {
@@ -138,6 +137,9 @@ app.get("/health", (req, res) => {
   });
 });
 
+// =====================================================
+// META WEBHOOK VERIFY
+// =====================================================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -156,57 +158,45 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+// =====================================================
+// SEND WHATSAPP MESSAGE
+// =====================================================
 async function sendWhatsAppMessage(to, message) {
   if (!WHATSAPP_TOKEN) {
-    throw new Error(
-      "WHATSAPP_TOKEN is not configured"
-    );
+    throw new Error("WHATSAPP_TOKEN is not configured");
   }
 
   if (!PHONE_NUMBER_ID) {
-    throw new Error(
-      "PHONE_NUMBER_ID is not configured"
-    );
+    throw new Error("PHONE_NUMBER_ID is not configured");
   }
 
-  const customerNumber =
-    normalizeWhatsAppNumber(to);
+  const customerNumber = normalizeWhatsAppNumber(to);
 
   if (!customerNumber) {
-    throw new Error(
-      "Customer WhatsApp number is missing"
-    );
+    throw new Error("Customer WhatsApp number is missing");
   }
 
-  const body =
-    String(message || "").trim();
+  const body = String(message || "").trim();
 
   if (!body) {
-    throw new Error(
-      "WhatsApp message is empty"
-    );
+    throw new Error("WhatsApp message is empty");
   }
 
   const url =
-    `https://graph.facebook.com/` +
-    `${GRAPH_API_VERSION}/` +
+    `https://graph.facebook.com/${GRAPH_API_VERSION}/` +
     `${PHONE_NUMBER_ID}/messages`;
 
   const response = await fetch(url, {
     method: "POST",
-
     headers: {
-      Authorization:
-        `Bearer ${WHATSAPP_TOKEN}`,
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
       "Content-Type": "application/json",
     },
-
     body: JSON.stringify({
       messaging_product: "whatsapp",
       recipient_type: "individual",
       to: customerNumber,
       type: "text",
-
       text: {
         preview_url: false,
         body,
@@ -228,54 +218,45 @@ async function sendWhatsAppMessage(to, message) {
     );
   }
 
+  console.log(
+    "WhatsApp message accepted by Meta:",
+    customerNumber,
+    data?.messages?.[0]?.id || ""
+  );
+
   return data;
 }
 
+// =====================================================
+// FINAL BILL FORMAT
+// =====================================================
 function buildFinalBillMessage(data) {
-  const customerName =
-    safeText(
-      data.customerName || data.name,
-      "Customer"
-    );
+  const customerName = safeText(
+    data.customerName || data.name,
+    "Customer"
+  );
 
   const pickup = safeText(data.pickup);
   const drop = safeText(data.drop);
 
-  const totalKM =
-    Number(data.totalKM || 0).toFixed(1);
+  const totalKM = Number(data.totalKM || 0).toFixed(1);
+  const kmFare = Number(data.kmFare || 0);
+  const driverBata = Number(data.driverBata || 0);
+  const toll = Number(data.toll || 0);
+  const parking = Number(data.parking || 0);
+  const permit = Number(data.permit || 0);
+  const hill = Number(data.hill || 0);
+  const totalFare = Number(data.totalFare || 0);
 
-  const kmFare =
-    Number(data.kmFare || 0);
+  const paymentStatus = safeText(
+    data.customerPaymentStatus || data.paymentStatus,
+    "Pending"
+  );
 
-  const driverBata =
-    Number(data.driverBata || 0);
-
-  const toll =
-    Number(data.toll || 0);
-
-  const parking =
-    Number(data.parking || 0);
-
-  const permit =
-    Number(data.permit || 0);
-
-  const hill =
-    Number(data.hill || 0);
-
-  const totalFare =
-    Number(data.totalFare || 0);
-
-  const paymentStatus =
-    safeText(
-      data.customerPaymentStatus,
-      "Pending"
-    );
-
-  const paymentMethod =
-    safeText(
-      data.customerPaymentMethod,
-      "Not specified"
-    );
+  const paymentMethod = safeText(
+    data.customerPaymentMethod || data.paymentMode,
+    "Not specified"
+  );
 
   return [
     "🚕 VIBELO Tours and Travels",
@@ -302,33 +283,27 @@ function buildFinalBillMessage(data) {
     "Thank you for travelling with VIBELO.",
   ].join("\n");
 }
+
+// =====================================================
+// INCOMING WHATSAPP WEBHOOK / AUTO REPLY
+// =====================================================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
     const value =
-      req.body?.entry?.[0]
-        ?.changes?.[0]
-        ?.value;
+      req.body?.entry?.[0]?.changes?.[0]?.value;
 
     const messages = value?.messages;
 
-    if (
-      !Array.isArray(messages) ||
-      messages.length === 0
-    ) {
+    if (!Array.isArray(messages) || messages.length === 0) {
       return;
     }
 
     for (const incoming of messages) {
-      const from =
-        normalizeWhatsAppNumber(
-          incoming?.from
-        );
+      const from = normalizeWhatsAppNumber(incoming?.from);
 
-      if (!from) {
-        continue;
-      }
+      if (!from) continue;
 
       if (incoming?.type !== "text") {
         await sendWhatsAppMessage(
@@ -343,28 +318,18 @@ app.post("/webhook", async (req, res) => {
             "Journey Time:",
           ].join("\n")
         );
-
         continue;
       }
 
-      const incomingText =
-        String(
-          incoming?.text?.body || ""
-        )
-          .trim()
-          .toLowerCase();
+      const incomingText = String(
+        incoming?.text?.body || ""
+      )
+        .trim()
+        .toLowerCase();
 
-      const greetings = [
-        "hi",
-        "hello",
-        "hai",
-        "hey",
-        "hii",
-      ];
+      const greetings = ["hi", "hello", "hai", "hey", "hii"];
 
-      if (
-        greetings.includes(incomingText)
-      ) {
+      if (greetings.includes(incomingText)) {
         await sendWhatsAppMessage(
           from,
           [
@@ -397,53 +362,43 @@ app.post("/webhook", async (req, res) => {
       }
     }
   } catch (error) {
-    console.error(
-      "Webhook processing error:",
-      error
-    );
+    console.error("Webhook processing error:", error);
   }
 });
 
-app.post(
-  "/send-whatsapp",
-  requireApiKey,
-  async (req, res) => {
-    try {
-      const { to, message } =
-        req.body || {};
+// =====================================================
+// DIRECT SEND ENDPOINT
+// =====================================================
+app.post("/send-whatsapp", requireApiKey, async (req, res) => {
+  try {
+    const { to, message } = req.body || {};
 
-      if (!to || !message) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "to and message are required",
-        });
-      }
-
-      const result =
-        await sendWhatsAppMessage(
-          to,
-          message
-        );
-
-      return res.status(200).json({
-        ok: true,
-        result,
-      });
-    } catch (error) {
-      console.error(
-        "send-whatsapp error:",
-        error
-      );
-
-      return res.status(500).json({
+    if (!to || !message) {
+      return res.status(400).json({
         ok: false,
-        error: error.message,
+        error: "to and message are required",
       });
     }
-  }
-);
 
+    const result = await sendWhatsAppMessage(to, message);
+
+    return res.status(200).json({
+      ok: true,
+      result,
+    });
+  } catch (error) {
+    console.error("send-whatsapp error:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// =====================================================
+// BOOKING CONFIRMATION
+// =====================================================
 app.post(
   "/send-booking-confirmation",
   requireApiKey,
@@ -464,8 +419,7 @@ app.post(
       if (!to) {
         return res.status(400).json({
           ok: false,
-          error:
-            "Customer WhatsApp number is required",
+          error: "Customer WhatsApp number is required",
         });
       }
 
@@ -474,42 +428,26 @@ app.post(
         "",
         "BOOKING CONFIRMED",
         "",
-        `Customer: ${safeText(
-          customerName,
-          "Customer"
-        )}`,
-        `Booking ID: ${safeText(
-          bookingId
-        )}`,
+        `Customer: ${safeText(customerName, "Customer")}`,
+        `Booking ID: ${safeText(bookingId)}`,
         `Pickup: ${safeText(pickup)}`,
         `Drop: ${safeText(drop)}`,
-        `Journey Date: ${safeText(
-          journeyDate
-        )}`,
-        `Journey Time: ${safeText(
-          journeyTime
-        )}`,
+        `Journey Date: ${safeText(journeyDate)}`,
+        `Journey Time: ${safeText(journeyTime)}`,
         `Vehicle: ${safeText(vehicle)}`,
         `Fare: ${money(totalFare)}`,
         "",
         "Thank you for choosing VIBELO.",
       ].join("\n");
 
-      const result =
-        await sendWhatsAppMessage(
-          to,
-          message
-        );
+      const result = await sendWhatsAppMessage(to, message);
 
       return res.status(200).json({
         ok: true,
         result,
       });
     } catch (error) {
-      console.error(
-        "Booking confirmation error:",
-        error
-      );
+      console.error("Booking confirmation error:", error);
 
       return res.status(500).json({
         ok: false,
@@ -519,132 +457,104 @@ app.post(
   }
 );
 
+// =====================================================
+// OUTBOX PROCESSING
+// =====================================================
 async function claimOutboxItem(docRef) {
-  return db.runTransaction(
-    async (transaction) => {
-      const snapshot =
-        await transaction.get(docRef);
+  return db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(docRef);
 
-      if (!snapshot.exists) {
-        return null;
-      }
+    if (!snapshot.exists) return null;
 
-      const data = snapshot.data();
+    const data = snapshot.data();
 
-      if (data.status !== "Pending") {
-        return null;
-      }
+    if (data.status !== "Pending") return null;
 
-      transaction.update(docRef, {
-        status: "Processing",
+    transaction.update(docRef, {
+      status: "Processing",
+      processingStartedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+    });
 
-        processingStartedAt:
-          admin.firestore.FieldValue
-            .serverTimestamp(),
-
-        updatedAt:
-          admin.firestore.FieldValue
-            .serverTimestamp(),
-      });
-
-      return {
-        id: snapshot.id,
-        ...data,
-      };
-    }
-  );
+    return {
+      id: snapshot.id,
+      ...data,
+    };
+  });
 }
 
-async function processFinalBillDocument(
-  docRef
-) {
-  const item =
-    await claimOutboxItem(docRef);
+async function processFinalBillDocument(docRef) {
+  const item = await claimOutboxItem(docRef);
 
   if (!item) {
     return {
       processed: false,
-      reason:
-        "Document is no longer Pending",
+      reason: "Document is no longer Pending",
     };
   }
 
   try {
     if (item.type !== "FINAL_BILL") {
       throw new Error(
-        `Unsupported outbox type: ${
-          item.type || "EMPTY"
-        }`
+        `Unsupported outbox type: ${item.type || "EMPTY"}`
       );
     }
 
-    const customerPhone =
-      normalizeWhatsAppNumber(
-        item.customerPhone
-      );
+    const customerPhone = normalizeWhatsAppNumber(
+      item.customerPhone
+    );
 
     if (!customerPhone) {
-      throw new Error(
-        "Customer WhatsApp number is missing"
-      );
+      throw new Error("Customer WhatsApp number is missing");
     }
 
-    const message =
-      buildFinalBillMessage(item);
+    const message = buildFinalBillMessage(item);
 
-    const metaResult =
-      await sendWhatsAppMessage(
-        customerPhone,
-        message
-      );
+    console.log(
+      "Processing FINAL_BILL:",
+      item.id,
+      customerPhone
+    );
+
+    const metaResult = await sendWhatsAppMessage(
+      customerPhone,
+      message
+    );
 
     const messageId =
-      metaResult?.messages?.[0]?.id ||
-      "";
+      metaResult?.messages?.[0]?.id || "";
 
     await docRef.update({
       status: "Sent",
-
       sendAttempts:
-        admin.firestore.FieldValue
-          .increment(1),
-
+        admin.firestore.FieldValue.increment(1),
       lastError: "",
-
       metaMessageId: messageId,
-
       sentAt:
-        admin.firestore.FieldValue
-          .serverTimestamp(),
-
+        admin.firestore.FieldValue.serverTimestamp(),
       updatedAt:
-        admin.firestore.FieldValue
-          .serverTimestamp(),
+        admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    if (item.dutyId) {
+    // Driver file currently queues enquiryId.
+    // Older records may contain dutyId, so support both.
+    const enquiryId = item.enquiryId || item.dutyId || "";
+
+    if (enquiryId) {
       try {
-        const enquiryRef =
-          db
-            .collection("enquiries")
-            .doc(
-              String(item.dutyId)
-            );
+        const enquiryRef = db
+          .collection("enquiries")
+          .doc(String(enquiryId));
 
         await enquiryRef.set(
           {
-            customerBillDeliveryStatus:
-              "Sent",
-
-            whatsappQueueStatus:
-              "Sent",
-
+            customerBillDeliveryStatus: "Sent",
+            whatsappQueueStatus: "Sent",
             whatsappSentAt:
-              admin.firestore.FieldValue
-                .serverTimestamp(),
-
-            whatsappMetaMessageId:
-              messageId,
+              admin.firestore.FieldValue.serverTimestamp(),
+            whatsappMetaMessageId: messageId,
           },
           { merge: true }
         );
@@ -663,52 +573,35 @@ async function processFinalBillDocument(
       metaMessageId: messageId,
     };
   } catch (error) {
-    console.error(
-      "Final bill send error:",
-      error
-    );
+    console.error("Final bill send error:", error);
 
     await docRef.update({
       status: "Failed",
-
       sendAttempts:
-        admin.firestore.FieldValue
-          .increment(1),
-
-      lastError:
-        String(
-          error.message || error
-        ).slice(0, 1000),
-
+        admin.firestore.FieldValue.increment(1),
+      lastError: String(
+        error.message || error
+      ).slice(0, 1000),
       failedAt:
-        admin.firestore.FieldValue
-          .serverTimestamp(),
-
+        admin.firestore.FieldValue.serverTimestamp(),
       updatedAt:
-        admin.firestore.FieldValue
-          .serverTimestamp(),
+        admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    if (item.dutyId) {
+    const enquiryId = item.enquiryId || item.dutyId || "";
+
+    if (enquiryId) {
       try {
         await db
           .collection("enquiries")
-          .doc(
-            String(item.dutyId)
-          )
+          .doc(String(enquiryId))
           .set(
             {
-              customerBillDeliveryStatus:
-                "Failed",
-
-              whatsappQueueStatus:
-                "Failed",
-
-              whatsappLastError:
-                String(
-                  error.message ||
-                  error
-                ).slice(0, 500),
+              customerBillDeliveryStatus: "Failed",
+              whatsappQueueStatus: "Failed",
+              whatsappLastError: String(
+                error.message || error
+              ).slice(0, 500),
             },
             { merge: true }
           );
@@ -728,15 +621,13 @@ async function processFinalBillDocument(
     };
   }
 }
-async function processWhatsAppOutbox(
-  limit = 10
-) {
-  const snapshot =
-    await db
-      .collection("whatsappOutbox")
-      .where("status", "==", "Pending")
-      .limit(limit)
-      .get();
+
+async function processWhatsAppOutbox(limit = 10) {
+  const snapshot = await db
+    .collection("whatsappOutbox")
+    .where("status", "==", "Pending")
+    .limit(limit)
+    .get();
 
   if (snapshot.empty) {
     return {
@@ -750,31 +641,27 @@ async function processWhatsAppOutbox(
   const results = [];
 
   for (const document of snapshot.docs) {
-    const result =
-      await processFinalBillDocument(
-        document.ref
-      );
-
+    const result = await processFinalBillDocument(
+      document.ref
+    );
     results.push(result);
   }
 
   return {
     checked: results.length,
-
-    sent: results.filter(
-      (x) => x.sent === true
-    ).length,
-
+    sent: results.filter((x) => x.sent === true).length,
     failed: results.filter(
       (x) =>
         x.processed === true &&
         x.sent === false
     ).length,
-
     results,
   };
 }
 
+// =====================================================
+// MANUAL OUTBOX PROCESSING ENDPOINTS
+// =====================================================
 let outboxProcessing = false;
 
 app.post(
@@ -791,18 +678,14 @@ app.post(
     outboxProcessing = true;
 
     try {
-      const result =
-        await processWhatsAppOutbox(10);
+      const result = await processWhatsAppOutbox(10);
 
       return res.status(200).json({
         ok: true,
         ...result,
       });
     } catch (error) {
-      console.error(
-        "Outbox processing error:",
-        error
-      );
+      console.error("Outbox processing error:", error);
 
       return res.status(500).json({
         ok: false,
@@ -819,8 +702,7 @@ app.post(
   requireApiKey,
   async (req, res) => {
     try {
-      const result =
-        await processWhatsAppOutbox(20);
+      const result = await processWhatsAppOutbox(20);
 
       return res.status(200).json({
         ok: true,
@@ -840,23 +722,62 @@ app.post(
   }
 );
 
+// =====================================================
+// AUTOMATIC OUTBOX PROCESSOR
+// Checks Firestore every 5 seconds.
+// Prevents overlapping runs with the same lock.
+// =====================================================
+const OUTBOX_INTERVAL_MS = 5000;
+
+async function runAutomaticOutboxProcessor() {
+  if (outboxProcessing) return;
+
+  outboxProcessing = true;
+
+  try {
+    const result = await processWhatsAppOutbox(20);
+
+    if (result.checked > 0) {
+      console.log(
+        `WhatsApp outbox: checked=${result.checked}, sent=${result.sent}, failed=${result.failed}`
+      );
+    }
+  } catch (error) {
+    console.error(
+      "Automatic WhatsApp outbox processing error:",
+      error
+    );
+  } finally {
+    outboxProcessing = false;
+  }
+}
+
+setInterval(
+  runAutomaticOutboxProcessor,
+  OUTBOX_INTERVAL_MS
+);
+
+// Also run once shortly after server startup.
+setTimeout(
+  runAutomaticOutboxProcessor,
+  2000
+);
+
+// =====================================================
+// PRIVACY
+// =====================================================
 app.get("/privacy", (req, res) => {
   res.type("html").send(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0"
   >
-
-  <title>
-    VIBELO Privacy Policy
-  </title>
+  <title>VIBELO Privacy Policy</title>
 </head>
-
 <body
   style="
     font-family:Arial,sans-serif;
@@ -866,9 +787,7 @@ app.get("/privacy", (req, res) => {
     line-height:1.7;
   "
 >
-  <h1>
-    VIBELO Privacy Policy
-  </h1>
+  <h1>VIBELO Privacy Policy</h1>
 
   <p>
     VIBELO Tours and Travels uses customer
@@ -897,6 +816,9 @@ app.get("/privacy", (req, res) => {
   `);
 });
 
+// =====================================================
+// 404
+// =====================================================
 app.use((req, res) => {
   res.status(404).json({
     ok: false,
@@ -904,6 +826,9 @@ app.use((req, res) => {
   });
 });
 
+// =====================================================
+// START SERVER
+// =====================================================
 app.listen(PORT, () => {
   console.log(
     `VIBELO WhatsApp Backend running on port ${PORT}`
