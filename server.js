@@ -294,6 +294,32 @@ app.post("/webhook", async (req, res) => {
     const value =
       req.body?.entry?.[0]?.changes?.[0]?.value;
 
+    // META DELIVERY STATUS LOGGING
+    // Logs sent / delivered / read / failed events returned by Meta.
+    const statuses = value?.statuses;
+
+    if (Array.isArray(statuses) && statuses.length > 0) {
+      for (const status of statuses) {
+        console.log(
+          "WHATSAPP DELIVERY STATUS:",
+          JSON.stringify({
+            id: status?.id || "",
+            status: status?.status || "",
+            recipient_id: status?.recipient_id || "",
+            timestamp: status?.timestamp || "",
+            errors: status?.errors || [],
+          })
+        );
+
+        if (status?.status === "failed") {
+          console.error(
+            "WHATSAPP DELIVERY FAILED:",
+            JSON.stringify(status?.errors || [])
+          );
+        }
+      }
+    }
+
     const messages = value?.messages;
 
     if (!Array.isArray(messages) || messages.length === 0) {
