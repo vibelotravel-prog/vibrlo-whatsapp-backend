@@ -311,6 +311,102 @@ app.post("/webhook", async (req, res) => {
           })
         );
 
+        // Keep Firestore in sync with the REAL Meta delivery status.
+        // Meta first accepts a message, then later reports sent/delivered/read/failed.
+        const metaMessageId = String(status?.id || "").trim();
+        const metaDeliveryStatus = String(status?.status || "").trim();
+
+        if (metaMessageId && metaDeliveryStatus) {
+          try {
+            const matchingOutbox = await db
+              .collection("whatsappOutbox")
+              .where("metaMessageId", "==", metaMessageId)
+              .limit(1)
+              .get();
+
+            if (!matchingOutbox.empty) {
+              const outboxDoc = matchingOutbox.docs[0];
+              const outboxData = outboxDoc.data() || {};
+              const enquiryId =
+                outboxData.enquiryId || outboxData.dutyId || "";
+
+              const updateData = {
+                metaDeliveryStatus,
+                metaStatusUpdatedAt:
+                  admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt:
+                  admin.firestore.FieldValue.serverTimestamp(),
+              };
+
+              if (metaDeliveryStatus === "delivered") {
+                updateData.customerDeliveryStatus = "Delivered";
+                updateData.deliveredAt =
+                  admin.firestore.FieldValue.serverTimestamp();
+              } else if (metaDeliveryStatus === "read") {
+                updateData.customerDeliveryStatus = "Read";
+                updateData.readAt =
+                  admin.firestore.FieldValue.serverTimestamp();
+              } else if (metaDeliveryStatus === "sent") {
+                updateData.customerDeliveryStatus = "Sent";
+              } else if (metaDeliveryStatus === "failed") {
+                updateData.status = "Failed";
+                updateData.customerDeliveryStatus = "Failed";
+                updateData.lastError = JSON.stringify(
+                  status?.errors || []
+                ).slice(0, 1000);
+                updateData.failedAt =
+                  admin.firestore.FieldValue.serverTimestamp();
+              }
+
+              await outboxDoc.ref.update(updateData);
+
+              if (enquiryId) {
+                const enquiryUpdate = {
+                  whatsappMetaDeliveryStatus: metaDeliveryStatus,
+                  whatsappStatusUpdatedAt:
+                    admin.firestore.FieldValue.serverTimestamp(),
+                };
+
+                if (metaDeliveryStatus === "delivered") {
+                  enquiryUpdate.customerBillDeliveryStatus = "Delivered";
+                  enquiryUpdate.whatsappQueueStatus = "Delivered";
+                  enquiryUpdate.whatsappDeliveredAt =
+                    admin.firestore.FieldValue.serverTimestamp();
+                } else if (metaDeliveryStatus === "read") {
+                  enquiryUpdate.customerBillDeliveryStatus = "Read";
+                  enquiryUpdate.whatsappQueueStatus = "Read";
+                  enquiryUpdate.whatsappReadAt =
+                    admin.firestore.FieldValue.serverTimestamp();
+                } else if (metaDeliveryStatus === "sent") {
+                  enquiryUpdate.customerBillDeliveryStatus = "Sent";
+                  enquiryUpdate.whatsappQueueStatus = "Sent";
+                } else if (metaDeliveryStatus === "failed") {
+                  enquiryUpdate.customerBillDeliveryStatus = "Failed";
+                  enquiryUpdate.whatsappQueueStatus = "Failed";
+                  enquiryUpdate.whatsappLastError = JSON.stringify(
+                    status?.errors || []
+                  ).slice(0, 500);
+                }
+
+                await db
+                  .collection("enquiries")
+                  .doc(String(enquiryId))
+                  .set(enquiryUpdate, { merge: true });
+              }
+            } else {
+              console.warn(
+                "No whatsappOutbox document found for Meta message:",
+                metaMessageId
+              );
+            }
+          } catch (statusUpdateError) {
+            console.error(
+              "Meta delivery status Firestore update error:",
+              statusUpdateError
+            );
+          }
+        }
+
         if (status?.status === "failed") {
           console.error(
             "WHATSAPP DELIVERY FAILED:",
