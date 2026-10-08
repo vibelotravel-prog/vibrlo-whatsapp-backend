@@ -357,6 +357,16 @@ app.post("/webhook", async (req, res) => {
                 updateData.failedAt =
                   admin.firestore.FieldValue.serverTimestamp();
               }
+const finalDeliveryStatus = {
+  sent: "Sent",
+  delivered: "Delivered",
+  read: "Read",
+  failed: "Failed"
+}[metaDeliveryStatus];
+
+if (finalDeliveryStatus) {
+  updateData.status = finalDeliveryStatus;
+}
 
               await outboxDoc.ref.update(updateData);
 
@@ -639,17 +649,18 @@ async function processFinalBillDocument(docRef) {
       item.id,
       customerPhone
     );
-
-    const metaResult = await sendWhatsAppMessage(
-      customerPhone,
-      message
-    );
+const metaResult = await sendWhatsAppTemplateMessage(
+  customerPhone,
+  "vibelo_final_bill",
+  "en",
+  buildFinalBillTemplateParams(item)
+);
 
     const messageId =
       metaResult?.messages?.[0]?.id || "";
 
     await docRef.update({
-      status: "Sent",
+      status: "Accepted",
       sendAttempts:
         admin.firestore.FieldValue.increment(1),
       lastError: "",
@@ -672,8 +683,7 @@ async function processFinalBillDocument(docRef) {
 
         await enquiryRef.set(
           {
-            customerBillDeliveryStatus: "Sent",
-            whatsappQueueStatus: "Sent",
+            customerBillDeli?",
             whatsappSentAt:
               admin.firestore.FieldValue.serverTimestamp(),
             whatsappMetaMessageId: messageId,
@@ -956,3 +966,110 @@ app.listen(PORT, () => {
     `VIBELO WhatsApp Backend running on port ${PORT}`
   );
 });
+
+async function sendWhatsAppTemplateMessage(
+  to,
+  templateName,
+  language,
+  parameters
+) {
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
+    throw new Error("Meta WhatsApp settings are missing");
+  }
+
+  const customerNumber = normalizeWhatsAppNumber(to);
+
+  if (!customerNumber) {
+    throw new Error("Customer WhatsApp number is missing");
+  }
+
+  if (!Array.isArray(parameters) || !parameters.length) {
+    throw new Error("Final bill template parameters are missing");
+  }
+
+  const url =
+    `https://graph.facebook.com/${GRAPH_API_VERSION}/` +
+    `${PHONE_NUMBER_ID}/messages`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: customerNumber,
+      type: "template",
+      template: {
+        name: templateName,
+        language: {
+          code: language,
+        },
+        components: [
+          {
+            type: "body",
+            parameters: parameters,
+          },
+        ],
+      },
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error(
+      "Final Bill Template Error:",
+      JSON.stringify(data)
+    );
+
+    throw new Error(
+      data?.error?.message ||
+      "WhatsApp Template sending failed"
+    );
+  }
+
+  return data;
+}
+
+function buildFinalBillTemplateParams(item) {
+  const p = item.templateParameters || {};
+
+  const value = (...items) => {
+    const found = items.find(
+      v => v !== undefined &&
+           v !== null &&
+           String(v).trim() !== ""
+    );
+    return String(found ?? "-");
+  };
+
+  const txt = v => ({
+    type: "text",
+    text: String(v)
+  });
+
+  return [
+    txt(value(p.customerName, item.customerName, "Customer")),
+    txt(value(p.driverName, item.driverName, "-")),
+    txt(value(p.vehicle, item.vehicleNumber, "-")),
+    txt(value(p.pickup, item.pickup, "-")),
+    txt(value(p.drop, item.drop, "-")),
+    txt(value(p.totalKM, item.totalKM, "-")),
+    txt(value(p.kmFare, item.kmFare, "-")),
+    txt(value(p.driverBata, item.driverBata, "-")),
+    txt(value(p.toll, item.toll, "0")),
+    txt(value(p.parking, item.parking, "0")),
+    txt(value(p.permit, item.permit, "0")),
+    txt(value(p.hill, item.hill, "0")),
+    txt(value(p.extraCharges, item.extraCharges, "0")),
+    txt(value(p.grossFare, item.grossTripAmount, item.totalFare, "-")),
+    txt(value(p.cashbackUsed, item.cashbackWalletUsed, item.cashbackUsed, "0")),
+    txt(value(p.finalPayable, item.finalAmountToPay, item.customerFinalPayable, item.totalFare, "-")),
+    txt(value(p.paymentStatus, item.customerPaymentStatus, "-")),
+    txt(value(p.paymentMethod, item.customerPaymentMethod, "-")),
+    txt(value(p.cashbackEarned, item.cashbackEarned, "0"))
+  ];
+}
