@@ -683,7 +683,7 @@ const metaResult = await sendWhatsAppTemplateMessage(
 
         await enquiryRef.set(
           {
-            customerBillDeli?",
+           customerBillDeliveryStatus: "Accepted",
             whatsappSentAt:
               admin.firestore.FieldValue.serverTimestamp(),
             whatsappMetaMessageId: messageId,
