@@ -896,6 +896,233 @@ setTimeout(
 );
 
 // =====================================================
+// BOLNA AI -> FIREBASE ENQUIRY (ADDITIVE MODULE)
+// No changes to WhatsApp, billing, or existing staff assignment.
+// This endpoint stores a NEW, UNASSIGNED enquiry.
+// Existing staff assignment logic must be verified separately.
+// =====================================================
+
+// Use a separate secret for the AI service instead of exposing the
+// general BACKEND_API_KEY (which authorizes other backend functions).
+const BOLNA_ENQUIRY_API_KEY = process.env.BOLNA_ENQUIRY_API_KEY;
+
+function requireBolnaApiKey(req, res, next) {
+  if (!BOLNA_ENQUIRY_API_KEY) {
+    return res.status(503).json({
+      ok: false,
+      error: "Bolna enquiry integration has not been configured"
+    });
+  }
+
+  const receivedKey = req.get("x-bolna-api-key");
+  if (!receivedKey || receivedKey !== BOLNA_ENQUIRY_API_KEY) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+  next();
+}
+
+function bolnaText(value, maxLength = 240) {
+  return String(value ?? "").trim().slice(0, maxLength);
+}
+
+function bolnaDateToISO(value) {
+  const input = bolnaText(value, 32);
+  let year, month, day;
+  let match = input.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    [, year, month, day] = match;
+  } else {
+    match = input.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (!match) return null;
+    [, day, month, year] = match;
+  }
+
+  const iso = `${year}-${month}-${day}`;
+  const parsed = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== iso) {
+    return null;
+  }
+  return iso;
+}
+
+function bolnaTimeTo24Hour(value) {
+  const input = bolnaText(value, 32).toLowerCase().replace(/\./g, ":");
+  const match = input.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (minute > 59) return null;
+  const meridiem = match[3];
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return null;
+    hour = hour % 12 + (meridiem === "pm" ? 12 : 0);
+  } else if (hour > 23) {
+    return null;
+  }
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function bolnaCurrentIST() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date());
+  const read = type => parts.find(part => part.type === type)?.value || "";
+  return {
+    date: `${read("year")}-${read("month")}-${read("day")}`,
+    time: `${read("hour")}:${read("minute")}`
+  };
+}
+
+app.post("/bolna/enquiry", requireBolnaApiKey, async (req, res) => {
+  try {
+    const input = req.body && typeof req.body === "object" ? req.body : {};
+
+    // Bolna must pass fully RESOLVED travel date and time, in IST.
+    // Relative terms (today/tomorrow) are not valid dates here.
+    const customerName = bolnaText(input.customerName || input.name, 120);
+    const phone = normalizeWhatsAppNumber(
+      input.customerPhone || input.phone || input.mobile
+    );
+    const pickup = bolnaText(input.pickup || input.from, 200);
+    const drop = bolnaText(input.drop || input.to, 200);
+    const journeyISO = bolnaDateToISO(input.journeyDate || input.pickupDate);
+    const journeyTime = bolnaTimeTo24Hour(
+      input.journeyTime || input.pickupTime
+    );
+    const serviceType = bolnaText(
+      input.serviceType || "One Way Drop Taxi", 100
+    );
+
+    // No tour/round-trip enquiry should be handled as a one-way booking.
+    if (!/^(one[ -]?way( drop taxi| taxi)?|drop taxi)$/i.test(serviceType)) {
+      return res.status(400).json({
+        ok: false,
+        error: "This API accepts One Way Drop Taxi enquiries only. Route other services to office staff."
+      });
+    }
+
+    const validPhone = /^(91\d{10}|\d{10})$/.test(phone);
+    if (!customerName || !validPhone || !pickup || !drop || !journeyISO || !journeyTime) {
+      return res.status(400).json({
+        ok: false,
+        error: "Customer name, valid Indian phone, pickup, drop, resolved journeyDate and journeyTime are required"
+      });
+    }
+
+    const nowIST = bolnaCurrentIST();
+    if (journeyISO < nowIST.date ||
+        (journeyISO === nowIST.date && journeyTime < nowIST.time)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Pickup date/time has already passed in Asia/Kolkata timezone"
+      });
+    }
+
+    const journeyDate = journeyISO; // ISO format is parseable by existing Staff/Admin date code.
+    const journeyDateDisplay = `${journeyISO.slice(8, 10)}-${journeyISO.slice(5, 7)}-${journeyISO.slice(0, 4)}`;
+    const callId = bolnaText(input.callId || input.call_id, 128);
+
+    const passengerCount = Number(input.passengerCount || input.passengers || 0);
+    const luggageCount = Number(input.luggageCount || input.bagCount || 0);
+    const document = {
+      customerName,
+      name: customerName,
+      customerPhone: phone,
+      phone,
+      mobile: phone,
+      pickup,
+      from: pickup,
+      drop,
+      to: drop,
+      pickupAddress: bolnaText(input.pickupAddress, 300),
+      dropAddress: bolnaText(input.dropAddress, 300),
+      journeyDate,
+      journeyDateDisplay,
+      journeyTime,
+      pickupDateTimeIST: `${journeyISO}T${journeyTime}:00+05:30`,
+      passengerCount: Number.isInteger(passengerCount) && passengerCount > 0 && passengerCount <= 100
+        ? passengerCount : null,
+      luggageCount: Number.isInteger(luggageCount) && luggageCount >= 0 && luggageCount <= 100
+        ? luggageCount : null,
+      vehiclePreference: bolnaText(input.vehiclePreference || input.vehicle, 160),
+      vehicleExactOnly: input.vehicleExactOnly === true,
+      details: bolnaText(input.details || input.specialInstructions, 1500),
+      serviceType: "One Way Drop Taxi",
+      source: "BOLNA_AI",
+      sourceChannel: "BOLNA_AI",
+      enquirySource: "Bolna AI Call",
+      aiEnquiry: true,
+      bolnaCallId: callId,
+      adminStatus: "New",
+      bookingStatus: "Enquiry",
+      status: "New Enquiry",
+      staffStatus: "New",
+      driverStatus: "Not Assigned",
+      assignedStaffId: "",
+      assignedStaffName: "",
+      assignedStaff: "",
+      assignedStaffUid: "",
+      staffOwnerLocked: false,
+      staffAssignmentMethod: "PENDING",
+      requiresStaffAssignment: true,
+      assignedDriverId: "",
+      assignedDriverName: "",
+      websiteEnquiry: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    let enquiryRef;
+    if (callId) {
+      // Repeat tool execution for the same call should not create
+      // a second booking enquiry.
+      const digest = require("crypto")
+        .createHash("sha256")
+        .update(callId)
+        .digest("hex")
+        .slice(0, 36);
+      enquiryRef = db.collection("enquiries").doc(`BOLNA_${digest}`);
+      try {
+        await enquiryRef.create(document);
+      } catch (error) {
+        if (error.code === 6 || error.code === "already-exists") {
+          return res.status(200).json({
+            ok: true,
+            enquiryId: enquiryRef.id,
+            duplicate: true,
+            message: "This call enquiry is already recorded. Office staff will follow up."
+          });
+        }
+        throw error;
+      }
+    } else {
+      // Bolna callId is recommended to prevent duplicate enquiries.
+      enquiryRef = await db.collection("enquiries").add(document);
+    }
+
+    console.log("BOLNA ENQUIRY CREATED:", enquiryRef.id);
+    return res.status(201).json({
+      ok: true,
+      enquiryId: enquiryRef.id,
+      staffAssigned: false,
+      message: "Enquiry received. Our office team will contact the customer."
+    });
+  } catch (error) {
+    console.error("Bolna enquiry save error:", error.message);
+    return res.status(500).json({
+      ok: false,
+      error: "Unable to save enquiry. Please ask office staff to follow up."
+    });
+  }
+});
+
+// =====================================================
 // PRIVACY
 // =====================================================
 app.get("/privacy", (req, res) => {
