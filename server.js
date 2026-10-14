@@ -1121,6 +1121,194 @@ app.post("/bolna/enquiry", requireBolnaApiKey, async (req, res) => {
     });
   }
 });
+// ================= VIBELO BOLNA AUTO ONE-WAY ADD-ON =================
+// Paste AFTER existing /bolna/enquiry handler and BEFORE generic 404 handler.
+// Requires existing: app, admin, db, requireBolnaApiKey, bolnaText,
+// bolnaDateToISO, bolnaTimeTo24Hour, bolnaCurrentIST, normalizeWhatsAppNumber.
+// Existing Meta/WhatsApp/Bolna enquiry handlers remain unchanged.
+{
+  const bolnaCrypto = require('crypto');
+  const BA_SETTINGS = db.collection('settings').doc('bolnaOneWayAutoBooking');
+  const baTs = () => admin.firestore.FieldValue.serverTimestamp();
+  const baTxt = (v, n=200) => bolnaText(v, n);
+  const baMoney = v => Math.round(Number(v)*100)/100;
+  const baPositiveNumber = v => Number.isFinite(Number(v)) && Number(v)>0;
+  const baIsOneWay = v => /^(one[ -]?way( drop taxi| taxi)?|drop taxi)$/i.test(baTxt(v,100));
+  async function baMode(){
+    const snap=await BA_SETTINGS.get();
+    return snap.exists && snap.data().enabled === true; // default is OFF
+  }
+  async function baRequireAdmin(req,res,next){
+    try{
+      const m=/^Bearer (\S+)$/i.exec(req.get('Authorization')||'');
+      if(!m) return res.status(401).json({ok:false,error:'Firebase Admin sign-in required'});
+      const decoded=await admin.auth().verifyIdToken(m[1],true);
+      if(decoded.admin!==true && decoded.role!=='admin') return res.status(403).json({ok:false,error:'Verified Firebase Admin custom claim required'});
+      req.bolnaAdminUid=decoded.uid;
+      next();
+    }catch(e){ return res.status(401).json({ok:false,error:'Firebase Admin token invalid or expired'}); }
+  }
+  app.get('/admin/bolna-oneway-auto',baRequireAdmin,async(req,res)=>{
+    try{return res.json({ok:true,enabled:await baMode()});}
+    catch(e){console.error('bolna control load',e.message);return res.status(503).json({ok:false,error:'Cannot read Bolna setting'});}
+  });
+  app.post('/admin/bolna-oneway-auto',baRequireAdmin,async(req,res)=>{
+    if(typeof req.body?.enabled!=='boolean')return res.status(400).json({ok:false,error:'enabled must be boolean'});
+    try{
+      const enabled=req.body.enabled;
+      const prev=await baMode();
+      const batch=db.batch();
+      batch.set(BA_SETTINGS,{enabled,updatedByUid:req.bolnaAdminUid,updatedAt:baTs()},{merge:true});
+      batch.set(db.collection('adminAuditLogs').doc(),{
+        action:'BOLNA_ONEWAY_AUTOMATION_CHANGE',source:'Admin Firebase Auth',actorUid:req.bolnaAdminUid,
+        previousEnabled:prev,newEnabled:enabled,createdAt:baTs()
+      });
+      await batch.commit();
+      return res.json({ok:true,enabled});
+    }catch(e){console.error('bolna control save',e.message);return res.status(503).json({ok:false,error:'Bolna setting not saved'});}
+  });
+
+  function baVehicle(v){
+    const t=baTxt(v,100).toLowerCase().replace(/[\s_-]+/g,' ').trim();
+    if(/^(sedan|small car|small sedan|dzire|swift dzire|etios|aura|tigor)$/.test(t))return {type:'Sedan',rate:15,seats:4};
+    if(/^(suv|7 seater|seven seater|innova|innova regular|ertiga|carens|kia carens|maruti ertiga)$/.test(t))return {type:'SUV',rate:20,seats:7};
+    if(/^(innova crysta|crysta)$/.test(t))return {type:'Innova Crysta',rate:25,seats:7};
+    return null; // unknown vehicle => staff
+  }
+  function baCallDocId(callId){
+    return 'BOLNA_'+bolnaCrypto.createHash('sha256').update(callId).digest('hex').slice(0,36);
+  }
+  // This quote is computed from Google Routes API, NOT from a distance guessed by AI.
+  // Requires GOOGLE_MAPS_API_KEY enabled for the Google Routes API in Render.
+  app.post('/bolna/oneway-quote',requireBolnaApiKey,async(req,res)=>{
+    try{
+      const input=req.body||{};
+      const callId=baTxt(input.callId||input.call_id,128);
+      const pickupAddress=baTxt(input.pickupAddress,300);
+      const dropAddress=baTxt(input.dropAddress,300);
+      const vehicle=baVehicle(input.vehiclePreference||input.vehicleType||input.vehicle);
+      const people=Number(input.passengerCount||input.passengers);
+      const key=process.env.GOOGLE_MAPS_API_KEY;
+      if(!callId||!pickupAddress||!dropAddress||!vehicle||!Number.isInteger(people)||people<1||people>vehicle.seats)
+        return res.status(400).json({ok:false,error:'callId, full pickup/drop address, supported vehicle and valid passengerCount required; send to staff'});
+      if(!key)return res.status(503).json({ok:false,error:'Route verification unavailable; staff confirmation required'});
+      const response=await fetch('https://routes.googleapis.com/directions/v2:computeRoutes',{
+        method:'POST',headers:{'Content-Type':'application/json','X-Goog-Api-Key':key,'X-Goog-FieldMask':'routes.distanceMeters'},
+        body:JSON.stringify({origin:{address:pickupAddress+', India'},destination:{address:dropAddress+', India'},travelMode:'DRIVE',routingPreference:'TRAFFIC_UNAWARE',computeAlternativeRoutes:false})
+      });
+      const body=await response.json();
+      const meters=Number(body?.routes?.[0]?.distanceMeters);
+      if(!response.ok||!Number.isFinite(meters)||meters<=0||meters>5000000)
+        return res.status(503).json({ok:false,error:'Verified route distance unavailable; staff confirmation required'});
+      const km=baMoney(meters/1000),billableKm=Math.max(120,Math.ceil(km));
+      const settings=await db.collection('settings').doc('commissionRules').get();
+      const x=settings.exists?settings.data():{};
+      const driverBata=Number.isFinite(Number(x.driverBata))&&Number(x.driverBata)>=0?Number(x.driverBata):400;
+      const pct=Number.isFinite(Number(x.oneWayCommissionPct))&&Number(x.oneWayCommissionPct)>=0?Number(x.oneWayCommissionPct):10;
+      const fixed=Number.isFinite(Number(x.driverGsc))&&Number(x.driverGsc)>=0?Number(x.driverGsc):200;
+      const kmFare=baMoney(billableKm*vehicle.rate),quotedFare=baMoney(kmFare+driverBata);
+      const commission=baMoney(kmFare*pct/100+fixed);
+      const id=bolnaCrypto.randomBytes(16).toString('hex');
+      const createdMs=Date.now();
+      await db.collection('bolnaOneWayQuotes').doc(id).create({
+        callId,pickupAddress,dropAddress,vehicleType:vehicle.type,ratePerKM:vehicle.rate,passengerCount:people,
+        routeDistanceKm:km,billableKm,kmFare,driverBata,quotedFare,commissionPct:pct,commissionFixed:fixed,
+        commissionTotal:commission,createdMs,expiresMs:createdMs+30*60*1000,source:'GOOGLE_ROUTES_API',createdAt:baTs()
+      });
+      return res.status(201).json({ok:true,quoteId:id,vehicleType:vehicle.type,routeDistanceKm:km,billableKm,ratePerKM:vehicle.rate,
+        kmFare,driverBata,quotedFare,quoteExpiresInMinutes:30,
+        excludedExtras:'Toll, parking, permit and hill charges are extra if applicable.'});
+    }catch(e){console.error('Bolna quote error',e.message);return res.status(503).json({ok:false,error:'Fare quote unavailable; staff confirmation required'});}
+  });
+
+  // Bolna must call this route only AFTER explicitly getting the customer's booking
+  // acceptance AND acceptance of the verified fare. Mere "OK" or a lead isn't confirmation.
+  // OFF -> enquiry for staff; ON with valid matching quote -> duty Open.
+  app.post('/bolna/confirmed-oneway',requireBolnaApiKey,async(req,res)=>{
+    try{
+      const x=req.body||{};
+      if(!baIsOneWay(x.serviceType))return res.status(400).json({ok:false,error:'Only one-way taxi; refer other services to staff'});
+      const callId=baTxt(x.callId||x.call_id,128);
+      const name=baTxt(x.customerName||x.name,120);
+      const phone=normalizeWhatsAppNumber(x.customerPhone||x.phone||x.mobile);
+      const pickup=baTxt(x.pickup||x.from,200),drop=baTxt(x.drop||x.to,200);
+      const date=bolnaDateToISO(x.journeyDate||x.pickupDate);
+      const time=bolnaTimeTo24Hour(x.journeyTime||x.pickupTime);
+      if(!callId||!name||!/^(91\d{10}|\d{10})$/.test(phone)||!pickup||!drop||!date||!time)
+        return res.status(400).json({ok:false,error:'callId, name, valid phone, pickup, drop, exact IST date/time required'});
+      const now=bolnaCurrentIST();
+      if(date<now.date||(date===now.date&&time<now.time))
+        return res.status(400).json({ok:false,error:'Journey date/time already passed in IST'});
+      const directEnabled=await baMode();
+      const quoteId=baTxt(x.quoteId,64);
+      let quote=null,autoApproved=false,reason='Staff confirmation mode';
+      if(directEnabled){
+        reason='Customer confirmation or verified quote not complete';
+        if(x.explicitCustomerConfirmation===true&&x.fareConfirmed===true&&x.acceptedPriceTerms===true&&quoteId){
+          const q=await db.collection('bolnaOneWayQuotes').doc(quoteId).get();
+          if(q.exists){
+            const d=q.data();
+            const accepted=Number(x.acceptedFareAmount);
+            const passengerCount=Number(x.passengerCount||x.passengers||0);
+            if(d.callId===callId&&Date.now()<=d.expiresMs&&
+               Number.isFinite(accepted)&&Math.abs(accepted-d.quotedFare)<0.005&&
+               passengerCount===d.passengerCount&&
+               baTxt(x.pickupAddress,300)===d.pickupAddress&&baTxt(x.dropAddress,300)===d.dropAddress&&
+               baVehicle(x.vehiclePreference||x.vehicleType||x.vehicle)?.type===d.vehicleType){
+              autoApproved=true;quote=d;reason='';
+            }else reason='Quote does not match / has expired / passenger count changed';
+          }else reason='Quote ID not found';
+        }
+      }
+      const enquiryId=baCallDocId(callId);
+      const enquiryRef=db.collection('enquiries').doc(enquiryId);
+      const base={customerName:name,name,phone,customerPhone:phone,mobile:phone,pickup,from:pickup,drop,to:drop,
+        journeyDate:date,journeyTime:time,pickupDateTimeIST:`${date}T${time}:00+05:30`,
+        pickupAddress:baTxt(x.pickupAddress,300),dropAddress:baTxt(x.dropAddress,300),
+        serviceType:'One Way Drop Taxi',source:'BOLNA_AI',sourceChannel:'BOLNA_AI',enquirySource:'Bolna AI Call',
+        aiEnquiry:true,bolnaCallId:callId,passengerCount:Number(x.passengerCount||x.passengers)||null,
+        details:baTxt(x.details||x.specialInstructions,1000),websiteEnquiry:false};
+      const result=await db.runTransaction(async tx=>{
+        const oldSnap=await tx.get(enquiryRef);
+        const old=oldSnap.exists?oldSnap.data():{};
+        const already=Boolean(old.assignedDriverId||old.driverAcceptedAt||['Open','Posted','Accepted','Trip Started','Running','Completed','Manually Assigned'].includes(String(old.dutyStatus||'')));
+        if(already)return {autoPosted:['Open','Posted'].includes(old.dutyStatus),alreadyProcessed:true,mode:'existing',enquiryId};
+        const initial={...base,status:'New Enquiry',bookingStatus:'Enquiry',adminStatus:'New',staffStatus:'New',
+          driverStatus:'Not Assigned',assignedStaffId:'',assignedStaffName:'',assignedStaffUid:'',staffOwnerLocked:false,
+          staffAssignmentMethod:'PENDING',requiresStaffAssignment:true,assignedDriverId:'',createdAt:baTs(),updatedAt:baTs()};
+        if(autoApproved){
+          // One Firestore write per document within a transaction: a new enquiry cannot be
+          // both tx.create() and tx.update() in the same transaction.
+          // Mirrors Staff V44's Open duty contract without touching that file.
+          const posted={...base,status:'Duty Posted',bookingStatus:'Confirmed',adminStatus:'Confirmed',
+            staffStatus:'Confirmed',aiCustomerConfirmed:true,dutyStatus:'Open',driverStatus:'Not Assigned',
+            assignedDriverId:'',assignedDriverName:'',driverName:'',driverPhone:'',vehicleNumber:'',
+            assignedStaffId:'',assignedStaffUid:'',staffAssignmentMethod:'AI_AUTO_CONFIRMED',requiresStaffAssignment:false,
+            dutySendMode:'all',manualAssignment:false,vehiclePreference:quote.vehicleType,vehicleType:quote.vehicleType,
+            ratePerKM:quote.ratePerKM,totalKM:quote.billableKm,estimatedKM:quote.routeDistanceKm,
+            kmFare:quote.kmFare,driverFee:quote.driverBata,totalFare:quote.quotedFare,
+            commissionPct:quote.commissionPct,commissionFixed:quote.commissionFixed,
+            commissionTotal:quote.commissionTotal,lockedCommissionTotal:quote.commissionTotal,
+            lockedCommissionPct:quote.commissionPct,lockedCommissionFixed:quote.commissionFixed,
+            requiredWallet:quote.commissionTotal,driverNotificationStatus:'New',customerPhoneHiddenBeforeAccept:true,
+            fareQuoteId:quoteId,autoConfirmedBy:'BOLNA_AI_VERIFIED_QUOTE',customerNotificationStatus:'Prepared',
+            confirmedAt:baTs(),dutyPostedAt:baTs(),updatedAt:baTs()};
+          if(oldSnap.exists) tx.update(enquiryRef,posted);
+          else tx.create(enquiryRef,{...initial,...posted});
+          return {autoPosted:true,mode:'auto',enquiryId};
+        }
+        if(oldSnap.exists){tx.update(enquiryRef,{aiConfirmPending:true,aiCustomerConfirmed:x.explicitCustomerConfirmation===true,updatedAt:baTs()});}
+        else tx.create(enquiryRef,initial);
+        return {autoPosted:false,mode:'staff',enquiryId};
+      });
+      return res.status(result.alreadyProcessed?200:201).json({ok:true,...result,
+        ...(result.mode==='staff'?{reason,message:'One-way enquiry kept for Staff confirmation; NOT sent to drivers.'}:
+        {message:'Confirmed one-way booking posted to eligible drivers; staff/admin may monitor.'})});
+    }catch(e){console.error('Bolna one-way auto confirmation',e.message);return res.status(503).json({ok:false,error:'Booking update failed; ask office staff to confirm before publishing duty'});}
+  });
+}
+// ================= END VIBELO BOLNA AUTO ADD-ON =================
+
 
 // =====================================================
 // PRIVACY
