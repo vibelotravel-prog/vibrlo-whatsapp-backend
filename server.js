@@ -318,11 +318,20 @@ app.post("/webhook", async (req, res) => {
 
         if (metaMessageId && metaDeliveryStatus) {
           try {
-            const matchingOutbox = await db
-              .collection("whatsappOutbox")
-              .where("metaMessageId", "==", metaMessageId)
-              .limit(1)
-              .get();
+            // Meta can deliver its webhook before the send endpoint saves
+            // the message ID in Firestore. Retry the lookup briefly.
+            let matchingOutbox;
+            for (let attempt = 0; attempt < 5; attempt++) {
+              matchingOutbox = await db
+                .collection("whatsappOutbox")
+                .where("metaMessageId", "==", metaMessageId)
+                .limit(1)
+                .get();
+              if (!matchingOutbox.empty) break;
+              if (attempt < 4) {
+                await new Promise(resolve => setTimeout(resolve, 400));
+              }
+            }
 
             if (!matchingOutbox.empty) {
               const outboxDoc = matchingOutbox.docs[0];
