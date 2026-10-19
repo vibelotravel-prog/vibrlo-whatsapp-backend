@@ -807,7 +807,7 @@ let outboxProcessing = false;
 
 app.post(
   "/process-whatsapp-outbox",
-  async (req, res) => {
+ requireApiKey, async (req, res) => {
     if (outboxProcessing) {
       return res.status(202).json({
         ok: true,
