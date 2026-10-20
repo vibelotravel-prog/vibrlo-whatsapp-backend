@@ -53,6 +53,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use("/api/voice-otp", require("./voice-otp"));
+app.use("/api/sms-otp", require("./sms_otp"));
 const PORT = process.env.PORT || 10000;
 
 // =====================================================
