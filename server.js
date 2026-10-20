@@ -52,7 +52,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
-
+app.use("/api/voice-otp", require("./voice-otp"));
 const PORT = process.env.PORT || 10000;
 
 // =====================================================
