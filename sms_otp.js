@@ -206,7 +206,9 @@ router.post("/send", async (req, res) => {
   }
 
   try {
-    const result = await factorRequest(`/SMS/${phone}/AUTOGEN`);
+ const result = await factorRequest(
+  "/SMS/" + phone + "/AUTOGEN2/VIBELO_LOGIN_OTP"
+);
     if (result.Status !== "Success" || typeof result.Details !== "string") {
       throw new Error("Provider rejected OTP request");
     }
