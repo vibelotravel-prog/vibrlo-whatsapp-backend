@@ -491,7 +491,7 @@ if (finalDeliveryStatus) {
         await sendWhatsAppMessage(
           from,
           [
-           [
+          
   "Thank you for choosing VIBELO Drop Taxi.",
   "",
   "For bookings and assistance, contact VIBELO Customer Care."
