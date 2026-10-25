@@ -474,18 +474,14 @@ if (finalDeliveryStatus) {
         await sendWhatsAppMessage(
           from,
           [
-            "Welcome to VIBELO Tours and Travels 🚕",
-            "",
-            "Premium Taxi & Tour Booking Service",
-            "",
-            "Please send:",
-            "Pickup Location",
-            "Drop Location",
-            "Journey Date",
-            "Journey Time",
-            "",
-            "Our team will assist you shortly.",
-          ].join("\n")
+  "🚕 VIBELO DROP TAXI",
+  "",
+  "Thank you for choosing VIBELO Drop Taxi!",
+  "",
+  "Our customer care executive will contact you shortly to assist with your booking.",
+  "",
+  "Your Journey, Our Priority. ✨"
+].join("\n")
         );
       } else {
         await sendWhatsAppMessage(
