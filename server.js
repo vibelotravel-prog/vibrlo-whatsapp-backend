@@ -491,14 +491,11 @@ if (finalDeliveryStatus) {
         await sendWhatsAppMessage(
           from,
           [
-            "Thank you for contacting VIBELO.",
-            "",
-            "Please send your trip details:",
-            "Pickup:",
-            "Drop:",
-            "Journey Date:",
-            "Journey Time:",
-          ].join("\n")
+           [
+  "Thank you for choosing VIBELO Drop Taxi.",
+  "",
+  "For bookings and assistance, contact VIBELO Customer Care."
+].join("\n")
         );
       }
     }
